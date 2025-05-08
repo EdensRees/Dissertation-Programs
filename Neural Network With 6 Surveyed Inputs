@@ -1,0 +1,437 @@
+import torch
+import torch.nn as nn
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics import r2_score
+from torch.utils.data import DataLoader
+
+data = pd.read_excel('Mechanical_Malawi.xlsx')
+X = data.iloc[ 3:299, 1:31] # .iloc for pandas
+yUnfiltered = data.iloc[ 3:299, 38:46]
+samples = 296
+y = np.ones((samples,1))
+toDelete = []
+
+for i in range(0,samples): # cleaning data
+
+  if X.iloc[i,3] == 'N': # clean input gables
+    X.iloc[i,3] = 0
+
+  #cleaning mortar quality
+  if X.iloc[i,27] == 'Mud' or X.iloc[i,27] == 'Mud RF':
+    X.iloc[i,27] = 1
+  elif X.iloc[i,27] == 'Cement':
+    X.iloc[i,27] = 2
+  #cleaning roof quality
+  if X.iloc[i,28] == 'Metallic':
+    X.iloc[i,28] = 1
+  elif X.iloc[i,28] == 'Thatched':
+    X.iloc[i,28] = 2
+    #cleaning masonry quality
+  if X.iloc[i,29] == 'Fired grade 1':
+    X.iloc[i,29] = 1
+  elif X.iloc[i,29] == 'Fired grade 2':
+    X.iloc[i,29] = 2
+  elif X.iloc[i,29] == 'Fired grade 3':
+    X.iloc[i,29] = 3
+  elif X.iloc[i,29] == 'Unfired grade 1':
+    X.iloc[i,29] = 4
+  elif X.iloc[i,29] == 'Unfired grade 2':
+    X.iloc[i,29] = 5
+  elif X.iloc[i,29] == 'Unfired grade 3':
+    X.iloc[i,29] = 6
+  else:
+    toDelete.append(i)
+
+
+  columnIndex = 0
+  finish = False
+
+  while finish == False and columnIndex < yUnfiltered.shape[1]: #cleaning output data
+    if yUnfiltered.iloc[i,columnIndex] == "Inf":
+      columnIndex = columnIndex + 2
+      if columnIndex >= yUnfiltered.shape[1]:
+        toDelete.append(i)
+        finish = True
+    else:
+      y[i,0] = yUnfiltered.iloc[i,columnIndex]
+      finish = True
+y = np.delete(y,toDelete,0)
+X = X.drop(X.index[toDelete])
+X = X.drop(X.columns[[3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]],axis =1) # index of columns to remove
+print(X)
+X_train, X_test, y_train, y_test = train_test_split(X,y, train_size = 0.75, shuffle=True)
+X_test_unscaled = X_test.copy()
+# Scaling input parameters
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+X_train = X_train.astype(np.float32)
+X_test = X_test.astype(np.float32)
+X_tr_tensor = torch.from_numpy(X_train).type(torch.float32)
+y_tr_tensor = torch.from_numpy(y_train).type(torch.float32)
+
+class SimpleDropoutNet(nn.Module):
+    def __init__(self, input_dim=6, hidden_dim=32, dropout_prob=0.2):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(p=dropout_prob),
+
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(p=dropout_prob),
+
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+#training function:
+BATCH_SIZE = 32
+LR = 0.001
+EPOCHS = 400
+def fit(model, BATCH_SIZE, LR, EPOCHS):
+  XBatch = DataLoader(X_tr_tensor, batch_size=BATCH_SIZE, shuffle=False)
+  yBatch = DataLoader(y_tr_tensor, batch_size=BATCH_SIZE, shuffle=False)
+  loss_arr = []
+  loss_fn = nn.MSELoss() #better for continuous values
+  optim = torch.optim.Adam(model.parameters(), lr = LR,betas=(0.5, 0.999), weight_decay=1e-3)
+
+  for epoch in range(EPOCHS):
+    for x_Batch, y_Batch in zip(XBatch, yBatch):
+      ypred = model(x_Batch)
+      loss = loss_fn(ypred, y_Batch)
+      loss.backward()
+      optim.step()
+      optim.zero_grad()
+    loss_arr.append(loss.item())
+  plt.plot(loss_arr)
+  plt.xlabel("Number of Epochs")
+  plt.ylabel("Error")
+  plt.tick_params(axis='both', labelsize=15)
+  plt.show()
+
+#running model
+model = SimpleDropoutNet()
+fit(model, BATCH_SIZE, LR, EPOCHS) # to train it
+
+X_ts_tensor = torch.tensor(X_test,dtype=torch.float32)
+ytest_pred = model(X_ts_tensor)
+ytrain_pred = model(X_tr_tensor)
+
+#mean absolute error
+MSE = mean_squared_error(y_test, ytest_pred.detach().numpy())
+print(f'MSE: {MSE}')
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+axes[0].set_title('Train data')
+axes[0].scatter(y_train, ytrain_pred.detach().numpy(), label='Actual')
+x_line = np.linspace(min(y_train), max(y_train), 100)  # Create x values for the line
+axes[0].plot(x_line, x_line, linestyle='--', color='black')  # Plot the line with linestyle='--'
+axes[0].set_xlabel('Actual Values')
+axes[0].set_ylabel('Predicted Values')
+
+axes[1].set_title('Test data')
+axes[1].scatter(y_test, ytest_pred.detach().numpy(), label='Actual')
+x_line = np.linspace(min(y_test), max(y_test), 100)  # Create x values for the line
+axes[1].plot(x_line, x_line, linestyle='--', color='black')  # Plot the line with linestyle='--'
+axes[1].set_xlabel('Actual Values')
+axes[1].set_ylabel('Predicted Values')
+
+
+plt.tight_layout()
+plt.show()
+
+# 1. Convert both to NumPy (if `y_test` is a tensor, detach and convert it)
+y_pred_np = ytest_pred.detach().numpy()
+if isinstance(y_test, torch.Tensor):
+    y_test_np = y_test.detach().numpy()
+else:
+    y_test_np = y_test  # already numpy
+
+# 2. Compute residuals
+residuals = y_pred_np - y_test_np
+
+# 3. Plot a histogram of the residuals
+plt.hist(residuals, bins=50, edgecolor='black')
+plt.xlabel("Prediction Error (Pred - True)")
+plt.ylabel("Frequency")
+plt.title("Distribution of Prediction Errors")
+plt.show()
+
+X_ts_tensor = torch.tensor(X_test,dtype=torch.float32)
+ytest_pred = model(X_ts_tensor)
+ytrain_pred = model(X_tr_tensor)
+
+#mean absolute error
+MSE = mean_squared_error(y_test, ytest_pred.detach().numpy())
+print(f'MSE: {MSE}')
+
+colours = ['red', 'blue', 'green', 'yellow', 'black', 'magenta']
+mortar = ['Mud', 'Cement']
+roof = ['Metallic', 'Thatched']
+masonry = ['Fired grade 1', 'Fired grade 2', 'Fired grade 3', 'Unfired grade 1', 'Unfired grade 2', 'Unfired grade 3']
+fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+
+#Overall Plot
+axes[0,0].set_title('Network Prediction Accuracy')
+axes[0,0].scatter(y_train, ytrain_pred.detach().numpy(), color = colours[0], alpha = 0.3, label = 'Train')
+axes[0,0].scatter(y_test, ytest_pred.detach().numpy(), color = colours[1], alpha = 0.3, label='Test')
+x_line = np.linspace(min(y_train), max(y_train), 100)  # Create x values for the line
+
+
+#Mortar Plot
+axes[0,1].set_title('Accuracy of Mortar quality')
+seenindex = []
+for i in range(0,X_test_unscaled.shape[0]):
+  index = int(X_test_unscaled.iloc[i,3]) -1
+  if index not in seenindex:
+    axes[0,1].scatter(y_test[i], ytest_pred[i].detach().numpy(), color = colours[index],label = mortar[index], alpha = 0.3)
+    seenindex.append(index)
+  else:
+    axes[0,1].scatter(y_test[i], ytest_pred[i].detach().numpy(), color = colours[index], alpha = 0.3)
+
+#roof Plot
+axes[1,0].set_title('Accuracy of Roof quality')
+seenindex = []
+for i in range(0,X_test_unscaled.shape[0]):
+  index = int(X_test_unscaled.iloc[i,4]) -1
+  if index not in seenindex:
+    axes[1,0].scatter(y_test[i], ytest_pred[i].detach().numpy(), color = colours[index],label = roof[index], alpha = 0.3)
+    seenindex.append(index)
+  else:
+    axes[1,0].scatter(y_test[i], ytest_pred[i].detach().numpy(), color = colours[index], alpha = 0.3)
+
+#mansonry Plot
+axes[1,1].set_title('Accuracy of masonry quality')
+seenindex = []
+for i in range(0,X_test_unscaled.shape[0]):
+  index = int(X_test_unscaled.iloc[i,5]) -1
+  if index not in seenindex:
+    axes[1,1].scatter(y_test[i], ytest_pred[i].detach().numpy(), color = colours[index],label = masonry[index], alpha = 0.3)
+    seenindex.append(index)
+  else:
+    axes[1,1].scatter(y_test[i], ytest_pred[i].detach().numpy(), color = colours[index], alpha = 0.3)
+
+x_line = np.linspace(min(y_test), max(y_test), 100)  # Create x values for the line
+for i in range(0,2):
+  for z in range(0,2):
+    axes[i,z].plot(x_line, x_line, linestyle='--', color='black')  # Plot the line with linestyle='--'
+    axes[i,z].set_xlabel('Actual Values')
+    axes[i,z].set_ylabel('Predicted Values')
+    axes[i,z].legend()
+plt.tight_layout()
+plt.show()
+
+#plotting fragility curves
+import scipy.stats as stats
+
+def fragilityPlot(floodLevels,x,y,tag,style,colour):
+  mean = np.mean(floodLevels)
+  standardDeviation = np.std(floodLevels)
+  Failure_height = np.linspace(0,2.5, 100)
+  fragility_curve = stats.norm.cdf(Failure_height, mean, standardDeviation)
+  axes[x,y].plot(Failure_height, fragility_curve,label = tag,alpha =0.8, linestyle = style,color = colour)
+
+def fragilityPlot_MinMax(floodLevels,x,y,style,colour):
+  mean_min = min(floodLevels)
+  mean_max = max(floodLevels)
+  standardDeviation = np.std(floodLevels)
+  Failure_height = np.linspace(0,2.5, 100)
+  fragility_curve_min = stats.norm.cdf(Failure_height, mean_min, standardDeviation)
+  fragility_curve_max = stats.norm.cdf(Failure_height, mean_max, standardDeviation)
+  axes[x,y].plot(Failure_height, fragility_curve_min,label = "Min Predicted",alpha =0.8, linestyle = style,color = colour)
+  axes[x,y].plot(Failure_height, fragility_curve_max,label = "Max Predicted",alpha =0.8, linestyle = style,color = colour)
+
+def confidenceInterval(floodLevels,x,y,colour):
+  floodLevels = floodLevels.flatten()
+  Numsamples = floodLevels.shape[0]
+  mean = np.mean(floodLevels)
+  standardDeviation = np.std(floodLevels)
+  Failure_height = np.linspace(0,2.5, 100)
+
+  interval = np.zeros(2)
+  interval[0] = mean + 1.96 * standardDeviation / np.sqrt(Numsamples)
+  interval[1] = mean - 1.96 * standardDeviation / np.sqrt(Numsamples)
+  Upper_frag_curve = stats.norm.cdf(Failure_height, interval[1], standardDeviation)
+  Lower_frag_curve = stats.norm.cdf(Failure_height, interval[0], standardDeviation)
+  axes[x,y].fill_between(Failure_height, Lower_frag_curve, Upper_frag_curve, alpha = 0.3, color = colour, label = '95% Confidence Interval')
+
+
+fig, axes = plt.subplots(4, 2, figsize=(8, 11))
+#Training Accuracy
+axes[0,0].set_title('Train Accuracy')
+#predicted
+fragilityPlot(ytrain_pred.detach().numpy(),0,0,'Predicted',"solid",colours[0])
+fragilityPlot_MinMax(ytrain_pred.detach().numpy(),0,0,"dashed",colours[2])
+#actual
+fragilityPlot(y_train,0,0,'Actual',"dashed",colours[1])
+
+#Testing Accuracy
+axes[0,1].set_title('Test Accuracy')
+#predicted
+fragilityPlot(ytest_pred.detach().numpy(),0,1,'Predicted',"solid",colours[0])
+confidenceInterval(ytest_pred.detach().numpy(),0,1,colours[0])
+#actual
+fragilityPlot(y_test,0,1,'Actual', "dashed",colours[1])
+
+#mortar quality
+axes[1,0].set_title('Mortar Quality (Test Data)')
+for z in range(1,3):
+  floodheight_pred = []
+  floodheight_Actual = []
+  for i in range(0,X_test_unscaled.shape[0]):
+    if X_test_unscaled.iloc[i,3] == z:
+      floodheight_Actual.append(y_test[i])
+      floodheight_pred.append(ytest_pred[i].detach().numpy())
+  fragilityPlot(floodheight_pred,1,0,mortar[z-1] + " (Predicted)","solid", colours[z-1])
+  fragilityPlot(floodheight_Actual,1,0,mortar[z-1] + " (Actual)","dashed",colours[z-1])
+
+#roof quality
+axes[1,1].set_title('Roof Quality (Test Data)')
+for z in range(1,3):
+  floodheight_pred = []
+  floodheight_Actual = []
+  for i in range(0,X_test_unscaled.shape[0]):
+    if X_test_unscaled.iloc[i,4] == z:
+      floodheight_Actual.append(y_test[i])
+      floodheight_pred.append(ytest_pred[i].detach().numpy())
+  fragilityPlot(floodheight_pred,1,1,roof[z-1]+" (Predicted)","solid", colours[z-1])
+  fragilityPlot(floodheight_Actual,1,1,roof[z-1] + " (Actual)","dashed",colours[z-1])
+
+# Both masonry quality
+axes[2,0].set_title('Masonry Quality (Test Data)')
+fired_floodheight_pred = []
+fired_floodheight_Actual  = []
+unfired_floodheight_pred = []
+unfired_floodheight_Actual  = []
+for i in range(0,X_test_unscaled.shape[0]):
+  if X_test_unscaled.iloc[i,5] == 1 or X_test_unscaled.iloc[i,5] == 2 or X_test_unscaled.iloc[i,5] == 3:
+    fired_floodheight_Actual.append(y_test[i])
+    fired_floodheight_pred.append(ytest_pred[i].detach().numpy())
+  else:
+    unfired_floodheight_Actual.append(y_test[i])
+    unfired_floodheight_pred.append(ytest_pred[i].detach().numpy())
+fragilityPlot(fired_floodheight_pred,2,0,"Fired (Predicted)","solid",colours[0])
+fragilityPlot(fired_floodheight_Actual,2,0, "Fired (Actual)","dashed",colours[0])
+fragilityPlot(unfired_floodheight_pred,2,0,"Unfired (Predicted)","solid",colours[1])
+fragilityPlot(unfired_floodheight_Actual,2,0, "Unfired (Actual)","dashed",colours[1])
+
+# Fired masonry quality
+axes[3,0].set_title('Fired Masonry Quality (Test Data)')
+for z in range(1,4):
+  floodheight_pred = []
+  floodheight_Actual  = []
+  for i in range(0,X_test_unscaled.shape[0]):
+    if X_test_unscaled.iloc[i,5] == z:
+      floodheight_Actual.append(y_test[i])
+      floodheight_pred.append(ytest_pred[i].detach().numpy())
+  fragilityPlot(floodheight_pred,3,0,masonry[z-1]+ " (Predicted)","solid",colours[z-1])
+  fragilityPlot(floodheight_Actual,3,0,masonry[z-1] + " (Actual)","dashed",colours[z-1])
+
+# Unfired masonry quality
+axes[3,1].set_title('Unfired Masonry Quality (Test Data)')
+for z in range(4,7):
+  floodheight_pred = []
+  floodheight_Actual  = []
+  for i in range(0,X_test_unscaled.shape[0]):
+    if X_test_unscaled.iloc[i,5] == z:
+      floodheight_Actual.append(y_test[i])
+      floodheight_pred.append(ytest_pred[i].detach().numpy())
+  fragilityPlot(floodheight_pred,3,1,masonry[z-1]+ " (Predicted)","solid",colours[z-4])
+  fragilityPlot(floodheight_Actual,3,1,masonry[z-1] + " (Actual)","dashed",colours[z-4])
+
+for i in range(0,4):
+  for z in range(0,2):
+    if i == 2 and z == 1:
+      fig.delaxes(axes[2,1])
+    else:
+      axes[i,z].set_xlabel('Flood Height')
+      axes[i,z].set_ylabel('Failure Probability')
+      axes[i,z].legend(loc='lower right',fontsize = "x-small")
+
+plt.tight_layout()
+plt.show()
+
+# function that plots the difference between the fragility curves for different failure probabilities
+def fragilityPlot_Diff(floodLevels_pred,floodLevels_Actual,x,y,tag,style,colour):
+  mean_pred = np.mean(floodLevels_pred)
+  standardDeviation_pred = np.std(floodLevels_pred)
+  mean_Actual = np.mean(floodLevels_Actual)
+  standardDeviation_Actual = np.std(floodLevels_Actual)
+
+  minVal = min(min(floodLevels_pred),min(floodLevels_Actual))
+  maxVal = max(max(floodLevels_pred),max(floodLevels_Actual))
+  Failure_height = np.linspace(minVal*0.5, maxVal*1.5, 1000)
+
+  fragility_curve_pred = stats.norm.cdf(Failure_height, mean_pred, standardDeviation_pred)
+  fragility_curve_actual = stats.norm.cdf(Failure_height, mean_Actual, standardDeviation_Actual)
+  fragilityDiff = abs(fragility_curve_pred - fragility_curve_actual)
+
+  axes[x,y].plot(fragility_curve_pred, fragilityDiff,label = tag,alpha =0.8, linestyle = style,color = colour)
+  fragility_curve_pred = fragility_curve_pred - mean_pred
+  fragility_curve_actual = fragility_curve_actual - mean_Actual
+  print(stats.ks_2samp(fragility_curve_pred,fragility_curve_actual))
+
+fig, axes = plt.subplots(2, 2, figsize=(6, 6))
+
+#Overall Accuracy
+axes[0,0].set_title('Overall Accuracy',fontsize = "small")
+fragilityPlot_Diff(ytrain_pred.detach().numpy(),y_train,0,0,'Train Data',"solid",colours[0])
+fragilityPlot_Diff(ytest_pred.detach().numpy(),y_test,0,0,'Test Data',"solid",colours[1])
+
+#mortar Accuracy
+axes[0,1].set_title('Mortar Quality Accuracy (Test Data)',fontsize = "small")
+for z in range(1,3):
+  floodheight_pred = []
+  floodheight_Actual = []
+  for i in range(0,X_test_unscaled.shape[0]):
+    if X_test_unscaled.iloc[i,3] == z:
+      floodheight_Actual.append(y_test[i])
+      floodheight_pred.append(ytest_pred[i].detach().numpy())
+  fragilityPlot_Diff(floodheight_pred,floodheight_Actual,0,1,mortar[z-1],"solid",colours[z-1])
+
+#roof quality
+axes[1,0].set_title('Roof Quality Accuracy (Test Data)',fontsize = "small")
+for z in range(1,3):
+  floodheight_pred = []
+  floodheight_Actual = []
+  for i in range(0,X_test_unscaled.shape[0]):
+    if X_test_unscaled.iloc[i,4] == z:
+      floodheight_Actual.append(y_test[i])
+      floodheight_pred.append(ytest_pred[i].detach().numpy())
+  fragilityPlot_Diff(floodheight_pred,floodheight_Actual,1,0,roof[z-1],"solid",colours[z-1])
+
+# Both masonry quality
+axes[1,1].set_title('Masonry Quality (Test Data)',fontsize = "small")
+fired_floodheight_pred = []
+fired_floodheight_Actual  = []
+unfired_floodheight_pred = []
+unfired_floodheight_Actual  = []
+for i in range(0,X_test_unscaled.shape[0]):
+  if X_test_unscaled.iloc[i,5] == 1 or X_test_unscaled.iloc[i,5] == 2 or X_test_unscaled.iloc[i,5] == 3:
+    fired_floodheight_Actual.append(y_test[i])
+    fired_floodheight_pred.append(ytest_pred[i].detach().numpy())
+  else:
+    unfired_floodheight_Actual.append(y_test[i])
+    unfired_floodheight_pred.append(ytest_pred[i].detach().numpy())
+fragilityPlot_Diff(fired_floodheight_pred,fired_floodheight_Actual,1,1, "Fired" ,"solid",colours[0])
+fragilityPlot_Diff(unfired_floodheight_pred,unfired_floodheight_Actual,1,1, "Unfired" ,"solid",colours[1])
+
+for i in range(0,2):
+  for z in range(0,2):
+      axes[i,z].set_xlabel('Failure Probability')
+      axes[i,z].set_ylabel('Flood Height Difference (m)')
+      axes[i,z].legend(loc='upper left',fontsize = "small")
+
+plt.tight_layout()
+plt.show()
